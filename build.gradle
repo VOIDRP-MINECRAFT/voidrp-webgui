@@ -1,0 +1,132 @@
+plugins {
+    id 'fabric-loom'       version '1.16.+' apply false
+    id 'net.neoforged.moddev' version '2.0.+' apply false
+    id 'maven-publish'
+}
+
+// Version-specific properties are loaded automatically by Stonecutter
+// from versions/{active}/gradle.properties.
+version = "${mod_version}+mc${minecraft_version}"
+group   = maven_group
+
+def sc_loader = stonecutter.current.version.contains("neoforge") ? "neoforge" : "fabric"
+
+stonecutter.constants {
+    put "fabric", (sc_loader == "fabric")
+}
+
+// NeoForge uses Mojang mappings: currentScreen → screen
+if (sc_loader != "fabric") {
+    stonecutter.swaps {
+        put "currentScreen", "screen"
+    }
+}
+
+base {
+    // Include the loader so Fabric and NeoForge jars for the same MC version
+    // don't share a filename — otherwise flat release assets overwrite each
+    // other and only one loader survives.
+    archivesName = "${archives_base_name}-${sc_loader}"
+}
+
+// Apply the loader-specific plugin after the stonecutter constants are set
+if (sc_loader == "fabric") {
+    apply plugin: 'fabric-loom'
+} else {
+    apply plugin: 'net.neoforged.moddev'
+}
+
+repositories {
+    mavenCentral()
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = 'Modrinth'
+                url = 'https://api.modrinth.com/maven'
+            }
+        }
+        filter {
+            includeGroup 'maven.modrinth'
+        }
+    }
+    if (sc_loader != "fabric") {
+        maven { url = 'https://maven.neoforged.net/releases' }
+    }
+}
+
+if (sc_loader == "fabric") {
+    dependencies {
+        minecraft "com.mojang:minecraft:${minecraft_version}"
+        mappings  "net.fabricmc:yarn:${yarn_mappings}:v2"
+        modImplementation "net.fabricmc:fabric-loader:${loader_version}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric_version}"
+        include(modImplementation("maven.modrinth:mcef-keksuccino:${mcef_version}"))
+    }
+} else {
+    neoForge {
+        version = project.neoforge_version
+    }
+    dependencies {
+        implementation "maven.modrinth:mcef-keksuccino:${mcef_version}"
+    }
+}
+
+processResources {
+    inputs.property 'version',         project.version
+    inputs.property 'minecraft_range', project.minecraft_range
+    if (sc_loader == "fabric") {
+        // Don't ship NeoForge metadata in the Fabric jar, or loaders/Modrinth
+        // mis-detect it as a NeoForge mod too.
+        exclude 'META-INF/neoforge.mods.toml'
+        filesMatching('fabric.mod.json') {
+            expand version: project.version, minecraft_range: project.minecraft_range
+        }
+    } else {
+        // Likewise, keep Fabric metadata out of the NeoForge jar.
+        exclude 'fabric.mod.json'
+        filesMatching('META-INF/neoforge.mods.toml') {
+            expand version: project.version, minecraft_range: project.minecraft_range
+        }
+        filesMatching('pack.mcmeta') { expand version: project.version }
+    }
+}
+
+
+tasks.register('bumpPatch') {
+    group       = 'versioning'
+    description = 'Increments mod_version patch in gradle.properties'
+    doLast {
+        def f = rootProject.file('gradle.properties')
+        def lines = f.readLines('UTF-8')
+        def newLines = []
+        def bumped = false
+        lines.each { line ->
+            if (line.startsWith('mod_version=')) {
+                def oldV  = line.substring('mod_version='.length()).trim()
+                def parts = oldV.split('\\.')
+                if (parts.length < 3) throw new GradleException("mod_version must be semver x.y.z, got: $oldV")
+                def p = parts[2].replaceAll(/[^0-9].*$/, '')
+                if (!p) throw new GradleException("bad patch in mod_version: $oldV")
+                def newV = "${parts[0]}.${parts[1]}.${p.toInteger() + 1}"
+                newLines.add("mod_version=${newV}")
+                bumped = true
+                println "[bumpPatch] ${oldV} -> ${newV}"
+            } else {
+                newLines.add(line)
+            }
+        }
+        if (!bumped) throw new GradleException("mod_version= not found in gradle.properties")
+        f.write(newLines.join(System.lineSeparator()) + System.lineSeparator(), 'UTF-8')
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = 'UTF-8'
+    it.options.release  = 21
+}
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
